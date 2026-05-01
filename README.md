@@ -1,98 +1,180 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Stripe SaaS Billing MVP
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A minimal, production-correct SaaS billing backend built with **NestJS**, **Stripe**, and **PostgreSQL (Supabase)**.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+> Payment processing is handled by Stripe. The database is the source of truth. Webhooks are the final authority on all payment state.
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Table of Contents
 
-## Project setup
+- [Overview](#overview)
+- [Core Principles](#core-principles)
+- [Technology Stack](#technology-stack)
+- [Scope](#scope)
+- [Database Schema](#database-schema)
+- [Payment Flow](#payment-flow)
+- [Webhook Handling](#webhook-handling)
+- [Idempotency](#idempotency)
+- [Race Condition Safety](#race-condition-safety)
+- [Out of Scope](#out-of-scope)
 
-```bash
-$ npm install
+---
+
+## Overview
+
+This project implements a billing system scoped to the minimum required for a production-safe SaaS payment flow. It covers PaymentIntent creation, Stripe webhook processing, and subscription activation — nothing more.
+
+The backend owns all financial state. The frontend is treated as an untrusted UI layer and is never consulted as a source of truth for payment outcomes.
+
+---
+
+## Core Principles
+
+| Principle | Description |
+|---|---|
+| **Database is source of truth** | All payment and subscription state lives in the database |
+| **Webhooks are final authority** | No subscription is activated without a verified Stripe webhook |
+| **Idempotency by design** | Repeated requests produce the same result without side effects |
+| **Race condition safety** | Concurrent requests cannot create duplicate charges or activations |
+| **Stripe is external** | Stripe processes payments; it does not control application state |
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Backend Framework | NestJS |
+| ORM | TypeORM |
+| Database | PostgreSQL (Supabase) |
+| Payment Processor | Stripe (PaymentIntents + Webhooks) |
+
+---
+
+## Scope
+
+This MVP is limited to the following capabilities:
+
+### Payment Processing
+- Create a Stripe PaymentIntent
+- Return `client_secret` to the client
+- Track payment lifecycle in the database
+
+### Webhook Processing
+- Receive and verify Stripe webhook signatures
+- Reject duplicate or invalid events
+- Update payment and subscription state based on verified events
+
+### Subscription Management
+- Activate subscriptions only after a successful payment webhook
+- Maintain subscription state in the database
+- Prevent duplicate activation
+
+### Idempotency Handling
+- Reject duplicate PaymentIntent creation using an `idempotencyKey`
+- Return existing payment state for repeated requests
+
+### Race Condition Safety
+- Prevent concurrent requests from creating multiple charges
+- Prevent concurrent webhook delivery from duplicating subscription activation
+- Enforce constraints at the database level as the final safety layer
+
+---
+
+## Database Schema
+
+The MVP uses exactly three tables. No additional tables are permitted within this scope.
+
+| Table | Purpose |
+|---|---|
+| `payments` | Tracks PaymentIntent lifecycle and status |
+| `webhook_events` | Records received Stripe events for deduplication |
+| `subscriptions` | Stores subscription state, activated only after webhook confirmation |
+
+---
+
+## Payment Flow
+
+```
+Client                        Backend                        Stripe
+  │                              │                              │
+  │── POST /payments ──────────►│                              │
+  │                              │── Create PaymentIntent ────►│
+  │                              │◄── { client_secret } ───────│
+  │◄── { client_secret } ───────│                              │
+  │                              │                              │
+  │── Stripe.js (client-side) ──────────────────────────────►│
+  │                              │                              │
+  │                              │◄── Webhook Event ───────────│
+  │                              │  (payment_intent.succeeded) │
+  │                              │                              │
+  │                              │── Verify signature           │
+  │                              │── Deduplicate event          │
+  │                              │── Update payments table      │
+  │                              │── Activate subscription      │
 ```
 
-## Compile and run the project
+**Step-by-step:**
 
-```bash
-# development
-$ npm run start
+1. Client sends a payment initiation request to the backend
+2. Backend checks the `idempotencyKey` against existing records
+3. Backend creates a Stripe PaymentIntent
+4. `client_secret` is returned to the client
+5. Client completes payment using the Stripe SDK (client-side)
+6. Stripe delivers a webhook event to the backend
+7. Backend verifies the webhook signature using the Stripe secret
+8. Event is checked for duplicates against `webhook_events`
+9. Payment state is updated in the database
+10. Subscription is activated if the event confirms success
 
-# watch mode
-$ npm run start:dev
+---
 
-# production mode
-$ npm run start:prod
-```
+## Webhook Handling
 
-## Run tests
+Stripe webhooks are the **only** trusted mechanism for confirming payment outcomes. Frontend confirmation is explicitly ignored.
 
-```bash
-# unit tests
-$ npm run test
+- Every incoming webhook is signature-verified before processing
+- Events are recorded in `webhook_events` before any state mutation
+- Processing is skipped if the event ID already exists (idempotent)
+- Subscription activation is gated entirely on webhook confirmation
 
-# e2e tests
-$ npm run test:e2e
+---
 
-# test coverage
-$ npm run test:cov
-```
+## Idempotency
 
-## Deployment
+- Each payment request must include an `idempotencyKey`
+- If a record with the same key already exists, the existing payment state is returned — no new PaymentIntent is created
+- This prevents duplicate charges from retries or network errors
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+---
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Race Condition Safety
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+- Concurrent payment requests for the same `idempotencyKey` are handled at the database level using unique constraints
+- Concurrent delivery of the same webhook event is deduplicated using the Stripe event ID
+- Database constraints act as the final enforcement layer — application-level checks are supplementary
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+---
 
-## Resources
+## Out of Scope
 
-Check out a few resources that may come in handy when working with NestJS:
+The following are explicitly excluded from this MVP:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- Authentication and user management (assumed to exist externally)
+- Email or notification systems
+- Background job queues or retry workers
+- Microservices architecture
+- Analytics, reporting, or dashboards
+- Custom retry logic beyond Stripe's built-in behavior
 
-## Support
+---
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Design Goals
 
-## Stay in touch
+This MVP is built to satisfy the following guarantees:
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- **No double charge is possible** under any concurrent or retry condition
+- **No subscription is activated** without a verified Stripe webhook
+- **Every payment state transition is traceable** in the database
+- **Stripe remains an external processor** — it does not drive application logic

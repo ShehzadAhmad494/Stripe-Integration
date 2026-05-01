@@ -14,12 +14,24 @@ export class PaymentController {
     return this.paymentService.createPayment(body.amount, body.currency);
   }
 
-  @Post('webhook')
-  webhook(@Req() req: any, @Headers('stripe-signature') sig: string) {
-    const event = this.stripeService.constructEvent(req.rawBody, sig);
+@Post('webhook')
+webhook(
+  @Req() req: any,
+  @Headers('stripe-signature') sig: string,
+) {
+  console.log("Webhook endpoint hit");
+  console.log("Signature:", sig);
+  console.log("RawBody:", req.rawBody);
 
-    this.paymentService.handleWebhook(event);
+  const event = this.stripeService.constructEvent(
+    req.rawBody,
+    sig,
+  );
 
-    return { received: true };
-  }
+  console.log("Verified Event:", event.type);
+
+  this.paymentService.handleWebhook(event);
+
+  return { received: true };
+}
 }
